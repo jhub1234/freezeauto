@@ -22,13 +22,13 @@ async function tryCloseAds(page) {
     }
 }
 
-// 📨 发送合并的 TG 消息
-function sendTG(resultText) {
+// 📨 发送合并的 TG 消息 (加入了金币变量)
+function sendTG(resultText, coinBalance) {
     return new Promise((resolve) => {
         if (!TG_CHAT_ID || !TG_TOKEN) return resolve();
         
-        // 按照你的要求合并输出，并在底部加上官网地址
-        const msg = `🎮 FreezeHost 续期报告\n\n${resultText}\n\n官网地址：https://free.freezehost.pro/`;
+        // 按照你的要求排版：结果 -> 金币 -> 官网
+        const msg = `🎮 FreezeHost 续期报告\n\n${resultText}\n\n💰 账户余额：${coinBalance} 金币\n\n官网地址：https://free.freezehost.pro/`;
 
         const req = https.request({
             hostname: 'api.telegram.org', path: `/bot${TG_TOKEN}/sendMessage`,
@@ -51,7 +51,8 @@ test('FreezeHost 多服务器自动续期', async () => {
     const page = await browser.newPage();
     page.setDefaultTimeout(TIMEOUT);
     
-    let reportLines = []; // 专门用来收集每台服务器结果的数组
+    let reportLines = []; 
+    let coinBalance = "未知"; // 初始化金币变量
 
     try {
         console.log('🔑 访问并登录 FreezeHost...');
@@ -78,20 +79,47 @@ test('FreezeHost 多服务器自动续期', async () => {
         if (await authBtn.isVisible().catch(() => false)) await authBtn.click();
 
         await page.waitForURL(/free\.freezehost\.pro\/dashboard/, { timeout: 30000 });
-        console.log('✅ 登录成功，开始查找服务器...');
+        console.log('✅ 登录成功，开始获取账户数据...');
 
         await page.waitForTimeout(4000);
 
-        // 🚀 核心更新：扫描并获取所有服务器的名字和链接
+        // 🚀 新增功能：智能提取金币余额
+        try {
+            console.log('🔍 正在抓取金币余额...');
+            coinBalance = await page.evaluate(() => {
+                // 暴力检索整个网页的纯文本寻找余额特征
+                const bodyText = document.body.innerText;
+                const match1 = bodyText.match(/AVAILABLE BALANCE\s*([\d,]+)/i);
+                const match2 = bodyText.match(/([\d,]+)\s*GLOBAL CURRENCY/i);
+                
+                if (match1) return match1[1];
+                if (match2) return match2[1];
+                return "未知";
+            });
+            console.log(`💰 当前金币余额：${coinBalance}`);
+        } catch (e) {
+            console.log('⚠️ 获取金币失败:', e.message);
+        }
+
+        // 🚀 提取服务器名称
         const servers = await page.evaluate(() => {
             const links = Array.from(document.querySelectorAll('a[href*="server-console"]'));
             return links.map((link, idx) => {
-                let card = link.closest('div');
-                for (let i = 0; i < 3; i++) { if (card && card.parentElement) card = card.parentElement; }
-                let titleEl = card ? card.querySelector('.text-xl, .font-bold, h1, h2, h3, strong') : null;
-                // 提取最显眼的文字作为名字
-                let rawText = titleEl ? titleEl.innerText.trim() : `服务器-${idx + 1}`;
-                let name = rawText.split('\n').map(l => l.trim()).filter(l => l)[0] || `服务器-${idx + 1}`;
+                let el = link;
+                let cardText = '';
+                while (el && el.tagName !== 'BODY') {
+                    if (el.innerText && (el.innerText.includes('ID:') || el.innerText.includes('Node:'))) {
+                        cardText = el.innerText;
+                        break;
+                    }
+                    el = el.parentElement;
+                }
+
+                let name = `服务器-${idx + 1}`;
+                if (cardText) {
+                    const lines = cardText.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+                    if (lines.length > 0) name = lines[0];
+                }
                 return { name: name.toUpperCase(), url: link.href };
             });
         });
@@ -99,7 +127,6 @@ test('FreezeHost 多服务器自动续期', async () => {
         if (servers.length === 0) throw new Error('未发现任何服务器链接');
         console.log(`✅ 共找到 ${servers.length} 台服务器，准备依次处理`);
 
-        // 🚀 循环处理每一台服务器
         for (const srv of servers) {
             console.log(`\n▶️ 开始处理: [${srv.name}]`);
             await page.goto(srv.url, { waitUntil: 'domcontentloaded' });
@@ -112,10 +139,14 @@ test('FreezeHost 多服务器自动续期', async () => {
             if (renewalStatusText) {
                 const daysMatch = renewalStatusText.match(/(\d+(?:\.\d+)?)\s*day/i);
                 const hoursMatch = renewalStatusText.match(/(\d+(?:\.\d+)?)\s*hour/i);
-                const days = daysMatch ? parseFloat(daysMatch[1]) : 0;
-                const hours = hoursMatch ? parseFloat(hoursMatch[1]) : 0;
                 
-                remainingText = `${days}天 ${hours}小时`;
+                const days = daysMatch ? parseInt(daysMatch[1]) : 0;
+                const hoursRaw = hoursMatch ? parseFloat(hoursMatch[1]) : 0;
+                
+                const hours = Math.floor(hoursRaw);
+                const minutes = Math.round((hoursRaw - hours) * 60);
+                
+                remainingText = `${days}天 ${hours}小时 ${minutes}分钟`;
 
                 if (days > 7) {
                     needRenew = false;
@@ -173,9 +204,9 @@ test('FreezeHost 多服务器自动续期', async () => {
         console.error(`❌ 致命错误: ${e.message}`);
         reportLines.push(`❌ 脚本运行异常: ${e.message}`);
     } finally {
-        // 🚀 全部执行完后，合并发送唯一一条信息
         if (reportLines.length > 0) {
-            await sendTG(reportLines.join('\n'));
+            // 在发送函数中传入提取到的金币变量
+            await sendTG(reportLines.join('\n'), coinBalance);
         }
         await browser.close();
     }
