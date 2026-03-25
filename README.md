@@ -29,3 +29,4 @@ Telegram 机器人的推送配置。
 
 格式：你的ChatID,你的BotToken
 
+注：借鉴了losy-mify大佬的项目进行修改搭建
