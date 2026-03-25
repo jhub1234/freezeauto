@@ -1,7 +1,7 @@
 name: 🎮 FreezeHost 自动续期
 on:
   schedule:
-    - cron: '0 8 * * *' # 每天 UTC 时间 8 点 (北京时间 16 点) 运行
+    - cron: '0 8 * * *' 
   workflow_dispatch:
 jobs:
   renew:
@@ -16,14 +16,19 @@ jobs:
       - run: npx playwright install chromium --with-deps
 
       - name: 🛡️ 启动内部 GOST 代理转发
-        if: ${{ secrets.GOST_PROXY != '' }}
         env:
           GOST_PROXY: ${{ secrets.GOST_PROXY }}
         run: |
-          wget -qO- https://github.com/ginuerzh/gost/releases/download/v2.11.5/gost-linux-amd64-2.11.5.gz | gzip -d > gost
-          chmod +x gost
-          nohup ./gost -L http://:8080 -F "$GOST_PROXY" > /dev/null 2>&1 &
-          sleep 3
+          if [ -z "$GOST_PROXY" ]; then
+            echo "⚠️ 未配置 GOST_PROXY，使用直连 (极易被拦截)"
+          else
+            echo "🛡️ 检测到代理配置，正在启动 GOST 转发..."
+            wget -qO- https://github.com/ginuerzh/gost/releases/download/v2.11.5/gost-linux-amd64-2.11.5.gz | gzip -d > gost
+            chmod +x gost
+            nohup ./gost -L http://:8080 -F "$GOST_PROXY" > /dev/null 2>&1 &
+            sleep 3
+            echo "✅ 代理转发已就绪"
+          fi
 
       - name: 🚀 运行续期脚本
         env:
