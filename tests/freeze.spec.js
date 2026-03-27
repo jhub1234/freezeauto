@@ -75,7 +75,7 @@ test('FreezeHost 多账号全自动续期', async () => {
     let proxyConfig = process.env.GOST_PROXY ? { server: process.env.GOST_PROXY } : undefined;
     const browser = await chromium.launch({ headless: true, proxy: proxyConfig });
     
-    let finalTgBlocks = []; // 存放每个账号拼装好的文本块
+    let finalTgBlocks = []; 
 
     for (let i = 0; i < accounts.length; i++) {
         const [email, password, twoFaSecret] = accounts[i].split(',').map(s => s?.trim());
@@ -88,7 +88,7 @@ test('FreezeHost 多账号全自动续期', async () => {
         
         let accReportLines = [];
         let coinBalance = "未知";
-        let discordUser = safeEmail; // 兜底，没抓到名字就用邮箱代替
+        let discordUser = safeEmail; 
 
         const context = await browser.newContext();
         const page = await context.newPage();
@@ -106,10 +106,8 @@ test('FreezeHost 多账号全自动续期', async () => {
             await page.fill('input[name="password"]', password);
             await page.click('button[type="submit"]');
 
-            // ⬇️⬇️⬇️ 修复版 2FA 抢救逻辑开始 ⬇️⬇️⬇️
             const twoFaInput = page.locator('input[autocomplete="one-time-code"], input[placeholder*="6"], input[maxlength="6"]');
             
-            // 抢救核心：强行让脚本在这里盯防 8 秒，真正等待 2FA 输入框出现
             await twoFaInput.waitFor({ state: 'visible', timeout: 8000 }).catch(() => {});
             
             if (await twoFaInput.isVisible()) {
@@ -117,11 +115,10 @@ test('FreezeHost 多账号全自动续期', async () => {
                 console.log('🔐 发现 2FA 页面，正在自动计算并填写...');
                 const token = authenticator.generate(twoFaSecret.replace(/\s/g, ''));
                 await twoFaInput.fill(token);
-                await page.waitForTimeout(500); // 稍微停顿，防止输太快按钮没反应
+                await page.waitForTimeout(500); 
                 await page.click('button[type="submit"]');
-                await page.waitForTimeout(4000); // 提交验证码后，给它 4 秒钟的时间跳转
+                await page.waitForTimeout(4000); 
             }
-            // ⬆️⬆️⬆️ 修复版 2FA 抢救逻辑结束 ⬆️⬆️⬆️
 
             await page.waitForTimeout(5000);
             const authBtn = page.locator('button:has-text("Authorize"), button:has-text("授权")');
@@ -131,13 +128,10 @@ test('FreezeHost 多账号全自动续期', async () => {
             console.log('✅ 登录成功！');
             await page.waitForTimeout(4000);
 
-            // 👤 抓取 Discord 用户名 (@xxx) 和金币余额
             try {
                 const fetchedData = await page.evaluate(() => {
                     const text = document.body.innerText;
-                    // 抓取带 @ 的用户名 (防空兜底)
                     const userMatch = text.match(/@[\w_.-]+/);
-                    // 适配新版 UI 截图里的 "2,178 COINS"
                     const match1 = text.match(/AVAILABLE BALANCE\s*([\d,]+)/i);
                     const match2 = text.match(/([\d,]+)\s*GLOBAL CURRENCY/i);
                     const match3 = text.match(/([\d,]+)\s*COINS/i); 
@@ -152,7 +146,6 @@ test('FreezeHost 多账号全自动续期', async () => {
                 console.log(`👤 用户名: ${discordUser} | 💰 金币: ${coinBalance}`);
             } catch (e) { }
 
-            // 🚀 提取服务器名称
             const servers = await page.evaluate(() => {
                 const links = Array.from(document.querySelectorAll('a[href*="server-console"]'));
                 return links.map((link, idx) => {
@@ -209,7 +202,12 @@ test('FreezeHost 多账号全自动续期', async () => {
                         if (await renewBtn.isVisible()) {
                             const btnText = (await renewBtn.innerText()).trim();
                             if (btnText.toLowerCase().includes('renew instance')) {
-                                await renewBtn.click({ force: true });
+                                
+                                // 💡 优化 1：点击前等 1 秒，确保绑定事件已加载，加 delay 模拟物理按下
+                                await page.waitForTimeout(1000);
+                                await renewBtn.click({ force: true, delay: 150 });
+                                
+                                // 给后端处理扣费的反应时间
                                 await page.waitForTimeout(6000); 
 
                                 if (page.url().includes('err=CANNOTAFFORDRENEWAL')) {
@@ -217,15 +215,31 @@ test('FreezeHost 多账号全自动续期', async () => {
                                     continue;
                                 }
 
-                                await page.goto(srv.url, { waitUntil: 'domcontentloaded' });
-                                await page.waitForTimeout(4000);
-                                let postTime = await getRemainingTime(page);
+                                // 💡 优化 2：智能轮询刷新。不一棍子打死，最多重试 3 次！
+                                let success = false;
+                                let postTime;
+                                console.log(`  🔄 开始验证时间更新...`);
                                 
-                                if (postTime.totalDays > preTime.totalDays) {
+                                for (let retry = 0; retry < 3; retry++) {
+                                    await page.goto(srv.url, { waitUntil: 'domcontentloaded' });
+                                    await page.waitForTimeout(4000);
+                                    postTime = await getRemainingTime(page);
+                                    
+                                    if (postTime.totalDays > preTime.totalDays) {
+                                        success = true;
+                                        break; // 成功增加了，直接跳出循环
+                                    }
+                                    
+                                    console.log(`  ⏳ 数据未同步，等待 5 秒后重试 (${retry + 1}/3)...`);
+                                    await page.waitForTimeout(5000);
+                                }
+                                
+                                if (success) {
                                     accReportLines.push(`${srv.name} : ✅ 成功续期 (最新剩余: ${postTime.text})`);
                                 } else {
                                     accReportLines.push(`${srv.name} : ⚠️ 未检测到时间增加 (当前: ${postTime.text})`);
                                 }
+
                             } else {
                                 accReportLines.push(`${srv.name} : ⏳ 未到期 (按钮: ${btnText})`);
                             }
@@ -241,7 +255,6 @@ test('FreezeHost 多账号全自动续期', async () => {
             console.error(`❌ 账号异常: ${e.message}`);
             accReportLines.push(`❌ 运行异常: ${e.message}`);
         } finally {
-            // 🌟 按照你的要求排版单账号区块
             let accountBlock = `🎮 FreezeHost ${discordUser} 续期报告\n\n` + 
                                accReportLines.join('\n') + `\n\n` +
                                `💰 账户余额：${coinBalance} 金币`;
@@ -251,9 +264,7 @@ test('FreezeHost 多账号全自动续期', async () => {
         }
     }
 
-    // 所有账号处理完毕，加入分割线和官网地址，合并发送
     if (finalTgBlocks.length > 0) {
-        // 如果只有一个账号，就不会有分割线；如果有多个，会用 ➖➖➖➖ 分隔
         let finalMessage = finalTgBlocks.join('\n\n➖➖➖➖➖➖➖➖➖➖\n\n') + `\n\n官网地址：https://free.freezehost.pro/`;
         await sendTG(finalMessage);
     }
